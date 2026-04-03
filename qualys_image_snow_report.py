@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-Qualys Container Security - Image SNOW Vulnerability Report
+Qualys Container Security - Image Vulnerability Report
 Version: 2.1.0
 Author:  Qualys CS Engineering
 License: Apache 2.0
@@ -925,14 +925,12 @@ def classify_qid_layer_origin(
         2. Look up each SHA in the image's layer map
         3. Read the isBaseLayer field on the matching layer
 
-    3 conditions:
+    3 values only:
         isBaseLayer = true   →  "Base"
         isBaseLayer = false  →  "Application/Child"
         isBaseLayer = null   →  "null"
 
-    Edge cases:
-        layerSha not found in layers[]  →  "Layer Not Found"
-        QID has no layerSha field       →  ""
+    If QID has no layerSha field → empty string.
 
     Returns: (classification_label, full_layer_sha_string)
     """
@@ -950,8 +948,8 @@ def classify_qid_layer_origin(
             else:
                 return "null", layer_sha
 
-    # layerSha exists on QID but doesn't match any layer in the image
-    return "Layer Not Found", (
+    # layerSha not found in layers — treat as null
+    return "null", (
         vulnerability_layer_shas[0]
         if vulnerability_layer_shas else "")
 
