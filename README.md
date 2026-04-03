@@ -1,4 +1,4 @@
-# Qualys Container Security - Image SNOW Vulnerability Report
+# Qualys Container Security - Image Vulnerability Report
 
 Enterprise CLI tool that fetches container image records from the Qualys CSAPI SNOW endpoint, classifies each QID vulnerability as originating from the **Base Image** or **Application/Child** layer, and produces a unified CSV + JSON report.
 
