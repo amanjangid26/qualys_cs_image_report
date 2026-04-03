@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-Qualys Container Security — Image SNOW Vulnerability Report
+Qualys Container Security - Image SNOW Vulnerability Report
 Version: 2.1.0
 Author:  Qualys CS Engineering
 License: Apache 2.0
