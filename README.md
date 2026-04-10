@@ -1,8 +1,8 @@
-# Qualys Container Security - Image Vulnerability Report
+# Qualys Container Security - Image SNOW Vulnerability Report
 
-Enterprise CLI tool that fetches container image records from the Qualys CSAPI SNOW endpoint, classifies each QID vulnerability as originating from the **Base** image or **Application/Child** layer, and produces a unified CSV + JSON report.
+Enterprise CLI tool that fetches container image records from the Qualys CSAPI SNOW endpoint, enriches each QID with vulnerability title, CVE IDs, and patch status, classifies each QID as **Base** or **Application/Child** layer, and produces a unified CSV + JSON report.
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue)](https://github.com)
 [![Python](https://img.shields.io/badge/python-3.8%2B-green)](https://python.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-orange)](LICENSE)
 
@@ -12,21 +12,19 @@ Enterprise CLI tool that fetches container image records from the Qualys CSAPI S
 
 | Feature | Description |
 |---------|-------------|
-| **Single API endpoint** | Uses only `/images/snow` — one call gets images, layers, vulns, software, and container counts |
-| **Flexible QQL filter** | Pass any Qualys QQL expression via CLI — all special characters URL-encoded automatically |
-| **QID Layer Classification** | 3 conditions: `isBaseLayer` = true / false / null → **Base** / **Application/Child** / **null** |
-| **CSV + JSON output** | Fully denormalized CSV (open in Excel and filter) + structured JSON |
-| **Base Image detection** | Reports whether Qualys detected a base image (`baseImage` field) |
-| **Container blast radius** | Associated running container count per image |
-| **Limit 250 per page** | Hardcoded to 250 records per API page for maximum throughput |
-| **Idempotent** | Checkpoint after each phase. Re-run to resume, not restart. `--force` for fresh |
-| **Rate-limit aware** | Reads `X-RateLimit-Remaining`, throttles proactively, honours `Retry-After` on 429 |
-| **Exponential backoff + jitter** | Retries transient failures without thundering herd |
-| **Atomic writes** | All files written to temp first, then renamed. No corrupt files on crash |
-| **Lock file** | Prevents concurrent runs against the same output directory |
-| **Signal handling** | `Ctrl+C` saves state and exits cleanly. Re-run to resume |
-| **Streaming / constant memory** | Reads page files one at a time — ~10 MB regardless of image count |
+| **Single SNOW endpoint + per-image vuln API** | SNOW gets images+layers+vulns+software+containers; vuln API enriches with title, CVEs, patch status |
+| **Flexible QQL filter** | Pass ANY Qualys QQL via `-f` or `--raw-filter` — all special characters URL-encoded automatically |
+| **QID Layer Classification** | 3 conditions: `isBaseLayer` = true → **Base** / false → **Application/Child** / null → **null** |
+| **Parent Base Image SHA** | Shows the base image SHA from the `baseImage` field |
+| **Vuln Title, CVE IDs, Patch Available** | Enriched from per-image vuln API call |
+| **Layer Created By** | Shows the exact Docker instruction that created each layer |
+| **Limit 250 per page** | Hardcoded for maximum throughput |
+| **Idempotent** | Checkpoint per phase, re-run resumes, `--force` for fresh |
+| **Rate-limit aware** | Reads `X-RateLimit-Remaining`, honours `Retry-After` on 429 |
+| **Atomic writes** | Temp file → rename, no corrupt files on crash |
+| **Streaming / constant memory** | ~10 MB regardless of image count |
 | **Duplicate detection** | Stops pagination when API returns repeated data — tested up to 50,000 images |
+| **Vuln cache** | Per-image vuln details cached to `vuln_cache/` for resume |
 
 ---
 
@@ -38,9 +36,6 @@ Enterprise CLI tool that fetches container image records from the Qualys CSAPI S
 # Ubuntu / Debian
 sudo apt-get install -y python3 curl
 
-# RHEL / Amazon Linux
-sudo yum install -y python3 curl
-
 # macOS
 brew install python3 curl
 ```
@@ -50,114 +45,38 @@ brew install python3 curl
 ## Quick Start
 
 ```bash
-# 1. Clone
 git clone https://github.com/<your-org>/qualys_image_snow_report.git
 cd qualys_image_snow_report
 
-# 2. Set credentials
 export QUALYS_USERNAME="myuser"
 export QUALYS_PASSWORD="mypass"
 
-# 3. Run
 python3 qualys_image_snow_report.py \
     -g https://gateway.qg2.apps.qualys.com
 ```
-
-Reports land in `./qualys_snow_output/`.
-
----
-
-## Authentication
-
-Set via environment variables (recommended) or CLI flags:
-
-```bash
-export QUALYS_USERNAME="myuser"
-export QUALYS_PASSWORD="mypass"
-```
-
-Or pass directly:
-
-```bash
-python3 qualys_image_snow_report.py -u myuser -p mypass -g ...
-```
-
-Credentials are URL-encoded automatically to handle special characters like `& = + @ ! $ #` in passwords.
-
-> **Never commit credentials to git.** Use environment variables, Vault, or a secrets manager.
 
 ---
 
 ## Usage
 
-### Basic
-
 ```bash
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com
-```
+# Basic — last 1 day
+python3 qualys_image_snow_report.py -g https://gateway.qg2.apps.qualys.com
 
-### Custom lookback
-
-```bash
 # Last 30 days
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com -d 30
-```
+python3 qualys_image_snow_report.py -g ... -d 30
 
-### QQL filter — appended to default
+# Custom QQL filter (appended to default)
+python3 qualys_image_snow_report.py -g ... -f "vulnerabilities.severity:5"
 
-The `-f` flag appends your QQL to the default `imagesInUse` filter with `and`:
-
-```bash
-# Only images with severity 5 vulns
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com \
-    -f "vulnerabilities.severity:5"
-
-# Only Ubuntu images
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com \
-    -f "operatingSystem:Ubuntu"
-
-# Specific registry
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com \
-    -f "repo.registry:\`docker.io\`"
-```
-
-### Raw QQL filter — complete override
-
-The `--raw-filter` flag replaces the entire default filter. Write any valid QQL — all special characters (backticks, single quotes, colons, brackets, parentheses, curly braces, etc.) are URL-encoded automatically.
-
-```bash
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com \
-    --raw-filter "imagesInUse:\`[now-30d ... now]\` and vulnerabilities.severity:5"
-
-# Complex QQL with multiple conditions
-python3 qualys_image_snow_report.py \
-    -g https://gateway.qg2.apps.qualys.com \
-    --raw-filter "imagesInUse:\`[now-7d ... now]\` and repo.registry:\`docker.io\` and operatingSystem:Ubuntu"
-```
-
-Full list of QQL tokens: https://docs.qualys.com/en/cs/1.41.0/search_tips/search_ui_images.htm
-
-### Other options
-
-```bash
-# Dry run — preview config and URLs, no API calls
-python3 qualys_image_snow_report.py -g ... --dry-run
-
-# Force fresh run (ignore checkpoint)
-python3 qualys_image_snow_report.py -g ... --force
-
-# Quiet mode (cron / CI)
-python3 qualys_image_snow_report.py -g ... -q --force
-
-# Via proxy
+# Full raw QQL (overrides -d and -f)
 python3 qualys_image_snow_report.py -g ... \
-    -C "--proxy http://proxy.corp.com:8080"
+    --raw-filter "imagesInUse:\`[now-30d ... now]\` and operatingSystem:Ubuntu"
+
+# Dry run / Force / Quiet
+python3 qualys_image_snow_report.py -g ... --dry-run
+python3 qualys_image_snow_report.py -g ... --force
+python3 qualys_image_snow_report.py -g ... -q --force
 ```
 
 ### CLI Options
@@ -166,21 +85,19 @@ python3 qualys_image_snow_report.py -g ... \
 |------|-------------|---------|
 | `-u`, `--username` | Qualys username | `$QUALYS_USERNAME` |
 | `-p`, `--password` | Qualys password | `$QUALYS_PASSWORD` |
-| `-g`, `--gateway` | Qualys gateway URL | `$QUALYS_GATEWAY` or US-2 |
-| `-d`, `--days` | Image lookback days (for default filter) | 1 |
+| `-g`, `--gateway` | Qualys gateway URL | US-2 |
+| `-d`, `--days` | Lookback days | 1 |
 | `-f`, `--filter` | Extra QQL appended with AND | — |
-| `--raw-filter` | Complete raw QQL (overrides `-d` and `-f`) | — |
-| `-l`, `--limit` | Records per API page | 250 |
+| `--raw-filter` | Complete raw QQL (overrides -d/-f) | — |
+| `-l`, `--limit` | Records per page | 250 |
 | `-o`, `--output-dir` | Output directory | `./qualys_snow_output` |
-| `--force` | Ignore checkpoint, start fresh | false |
-| `-r`, `--retries` | Max retries per API call | 3 |
-| `--cps` | Max API calls per second | 2 |
-| `-C`, `--curl-extra` | Extra curl args (e.g. `"--proxy http://..."`) | — |
+| `--force` | Start fresh | false |
+| `-r`, `--retries` | Max retries | 3 |
+| `--cps` | Max API calls/sec | 2 |
+| `-C`, `--curl-extra` | Extra curl args | — |
 | `-v`, `--verbose` | Debug output | false |
-| `-q`, `--quiet` | Suppress console output | false |
-| `--dry-run` | Preview config, no API calls | false |
-
-All flags can also be set via environment variables with `QUALYS_` prefix.
+| `-q`, `--quiet` | Suppress console | false |
+| `--dry-run` | Preview, no API calls | false |
 
 ---
 
@@ -190,85 +107,75 @@ All flags can also be set via environment variables with `QUALYS_` prefix.
 qualys_snow_output/
 ├── qualys_image_snow_report.csv     ← Main report (open in Excel)
 ├── qualys_image_snow_report.json    ← Structured JSON
-├── run_summary.json                 ← Machine-readable execution stats
+├── run_summary.json                 ← Machine-readable stats
 ├── report_YYYYMMDD_HHMMSS.log      ← Execution log
-└── pages/                           ← Raw API responses (for resume)
+├── pages/                           ← Raw SNOW API responses (resume)
+└── vuln_cache/                      ← Per-image vuln details (resume)
 ```
 
-### CSV Columns (26)
+### CSV Columns (30)
 
-| # | Column | Description |
-|---|--------|-------------|
-| 1 | `Image_ID` | Short 12-char image ID |
-| 2 | `Image_SHA` | Full SHA256 |
-| 3 | `Operating_System` | e.g. Alpine Linux 3.16.2 |
-| 4 | `Architecture` | arm64, amd64 |
-| 5 | `Image_Created` | Creation timestamp (ISO 8601) |
-| 6 | `Image_Last_Scanned` | Last Qualys scan timestamp |
-| 7 | `Image_Scan_Types` | SCA, STATIC, DYNAMIC |
-| 8 | `Image_Source` | GENERAL, CONTINUOUS_ASSESSMENT |
-| 9 | `Registry` | e.g. docker.io, mcr.microsoft.com |
-| 10 | `Repository` | e.g. library/nginx |
-| 11 | `Image_Tag` | e.g. v1.2.3, latest |
-| 12 | `Risk_Score` | Qualys TruRisk score |
-| 13 | `Base_Image_Detected` | Yes / No — from the `baseImage` API field |
-| 14 | `Associated_Container_Count` | Running containers using this image |
-| 15 | `Total_Vulnerabilities_On_Image` | Vuln count on the image |
-| 16 | `Vuln_QID` | Qualys vulnerability ID |
-| 17 | `Vuln_QDS_Score` | QDS score (0–100) |
-| 18 | `Vuln_QDS_Severity` | CRITICAL / HIGH / MEDIUM / LOW |
-| 19 | `Vuln_Scan_Type` | How this vuln was found (SCA / STATIC / DYNAMIC) |
-| 20 | `QID_Layer_Type` | **Base** / **Application/Child** / **null** |
-| 21 | `QID_Layer_SHA` | Full 64-char SHA of the layer this QID came from |
-| 22 | `Vuln_Affected_Software_Count` | Number of packages affected by this QID |
-| 23 | `Software_Name` | Affected package name |
-| 24 | `Software_Installed_Version` | Currently installed version |
-| 25 | `Software_Fix_Version` | Remediation version |
-| 26 | `Software_Package_Path` | JAR/package path in the image |
+| # | Column | Source | Description |
+|---|--------|--------|-------------|
+| 1 | `Image_ID` | SNOW | Short 12-char image ID |
+| 2 | `Image_SHA` | SNOW | Full SHA256 |
+| 3 | `Operating_System` | SNOW | e.g. Alpine Linux 3.16.2 |
+| 4 | `Architecture` | SNOW | arm64, amd64 |
+| 5 | `Image_Created` | SNOW | Creation timestamp |
+| 6 | `Image_Last_Scanned` | SNOW | Last scan timestamp |
+| 7 | `Image_Scan_Types` | SNOW | SCA, STATIC, DYNAMIC |
+| 8 | `Image_Source` | SNOW | GENERAL, CONTINUOUS_ASSESSMENT |
+| 9 | `Registry` | SNOW | e.g. docker.io |
+| 10 | `Repository` | SNOW | e.g. library/nginx |
+| 11 | `Image_Tag` | SNOW | e.g. v1.2.3 |
+| 12 | `Risk_Score` | SNOW | TruRisk score |
+| 13 | `Parent_Base_Image` | SNOW | SHA of the parent base image (from `baseImage` field) |
+| 14 | `Associated_Container_Count` | SNOW | Running containers using this image |
+| 15 | `Total_Vulnerabilities_On_Image` | SNOW | Vuln count |
+| 16 | `Vuln_QID` | SNOW | Qualys vulnerability ID |
+| 17 | `Vuln_Title` | Vuln API | Full vulnerability title |
+| 18 | `Vuln_QDS_Score` | SNOW | QDS score (0-100) |
+| 19 | `Vuln_QDS_Severity` | SNOW | CRITICAL/HIGH/MEDIUM/LOW |
+| 20 | `Vuln_Scan_Type` | SNOW | SCA/STATIC/DYNAMIC |
+| 21 | `Vuln_CVE_IDs` | Vuln API | Comma-separated CVE IDs |
+| 22 | `Vuln_Patch_Available` | Vuln API | true / false |
+| 23 | `QID_Layer_Type` | SNOW | **Base** / **Application/Child** / **null** |
+| 24 | `QID_Layer_SHA` | SNOW | Full 64-char layer SHA |
+| 25 | `QID_Layer_Created_By` | SNOW | Docker instruction that created the layer |
+| 26 | `Vuln_Affected_Software_Count` | SNOW | Packages affected by this QID |
+| 27 | `Software_Name` | SNOW | Package name |
+| 28 | `Software_Installed_Version` | SNOW | Installed version |
+| 29 | `Software_Fix_Version` | SNOW | Fix version |
+| 30 | `Software_Package_Path` | SNOW | JAR/package path |
 
 ### QID Layer Classification
 
-The `QID_Layer_Type` column (column 20) evaluates 3 conditions from the Qualys API's `isBaseLayer` field on each image layer:
-
-| `isBaseLayer` value | `QID_Layer_Type` | Meaning |
-|---------------------|------------------|---------|
-| `true` | **Base** | Qualys confirmed this QID comes from the base/parent image layer |
-| `false` | **Application/Child** | Qualys confirmed this QID comes from an application Dockerfile layer |
-| `null` | **null** | Qualys could not determine — base image detection not available for this image |
-
-### Row Logic
-
-| Row type | Driven by | Vuln cols | Software cols |
-|----------|-----------|-----------|---------------|
-| **Vulnerability** | Each QID × affected software | Filled | Filled |
-| **QID-only** | QID with no software detail | Filled | Blank |
-| **Bare image** | Image with no vulnerabilities | Blank | Blank |
-
-Multi-registry images get **separate rows per registry** — no pipe-delimited values.
+| `isBaseLayer` | `QID_Layer_Type` | Meaning |
+|---------------|------------------|---------|
+| `true` | **Base** | QID from parent/base image layer |
+| `false` | **Application/Child** | QID from application Dockerfile layer |
+| `null` | **null** | Qualys could not determine |
 
 ---
 
 ## How It Works
 
-### Phase 0: Authentication
-POST `/auth` with username + password → JWT token (valid 4 hours). Credentials URL-encoded to handle special characters.
+**Phase 0** — POST `/auth` → JWT token (4 hours)
 
-### Phase 1: Fetch images
-GET `/images/snow` with offset-based pagination (250 per page). Each page saved to `pages/snow_NNNN.json` for crash recovery. Stops when: empty page, fewer records than limit, or duplicate data detected. No upper bound — tested with 50,000+ images.
+**Phase 1** — GET `/images/snow` paginated (250/page). Duplicate detection stops infinite loops.
 
-### Phase 2: Report generation
-Streams through page files one at a time (constant ~10 MB memory). Cross-references each QID's `layerSha` against the image's `layers[]` to read `isBaseLayer`. Writes CSV + JSON atomically.
+**Phase 2** — GET `/images/<SHA>/vuln?type=ALL&applyException=true` per unique image SHA. Gets title, CVE IDs, patchAvailable. Cached to `vuln_cache/`.
 
-### Phase 3: Summary
-Prints execution stats and writes `run_summary.json`.
+**Phase 3** — Stream pages → merge SNOW + vuln data → CSV + JSON (constant ~10 MB memory).
+
+**Phase 4** — Print summary + `run_summary.json`.
 
 ### Idempotency
 
-Each phase writes a checkpoint file. On re-run:
-- **Same config** → resumes from last checkpoint
-- **Config changed** → starts fresh automatically
-- **`--force`** → clears checkpoint, starts fresh
-- **`Ctrl+C` mid-run** → saves state, resume on next run
+- **Same config re-run** → resumes from checkpoint
+- **Config changed** → auto-resets, starts fresh
+- **`--force`** → clears everything
+- **Ctrl+C** → saves state, resume on next run
 
 ---
 
@@ -292,17 +199,14 @@ Each phase writes a checkpoint file. On re-run:
 
 ---
 
+## QQL Reference
+
+Full list of supported QQL tokens:
+https://docs.qualys.com/en/cs/1.42.0/search_tips/search_ui_images.htm
+
+---
+
 ## CI/CD
-
-### Cron
-
-```bash
-0 2 * * * QUALYS_USERNAME="$(cat /etc/qualys/user)" \
-          QUALYS_PASSWORD="$(cat /etc/qualys/pass)" \
-    python3 /opt/qualys_image_snow_report.py \
-    -g "https://gateway.qg2.apps.qualys.com" \
-    -d 1 -o /data/qualys/$(date +\%Y\%m\%d) -q --force
-```
 
 ### GitHub Actions
 
@@ -315,7 +219,6 @@ Each phase writes a checkpoint file. On re-run:
     python3 qualys_image_snow_report.py \
         -g "${{ secrets.QUALYS_GATEWAY }}" \
         -d 1 -o ./report -q --force
-
 - uses: actions/upload-artifact@v4
   with:
     name: qualys-snow-report
@@ -324,21 +227,12 @@ Each phase writes a checkpoint file. On re-run:
 
 ### Docker
 
-```dockerfile
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-COPY qualys_image_snow_report.py /app/
-WORKDIR /app
-ENTRYPOINT ["python3", "qualys_image_snow_report.py"]
-```
-
 ```bash
 docker run --rm \
     -e QUALYS_USERNAME="$USER" \
     -e QUALYS_PASSWORD="$PASS" \
     -v $(pwd)/output:/app/qualys_snow_output \
-    qualys-snow-reporter \
-    -g "https://gateway.qg2.apps.qualys.com" -d 30
+    qualys-snow-reporter -g "https://gateway.qg2.apps.qualys.com" -d 30
 ```
 
 ---
@@ -347,13 +241,12 @@ docker run --rm \
 
 | Issue | Fix |
 |-------|-----|
-| `HTTP 401` | Credentials invalid — check username/password |
-| `HTTP 403` | User lacks CSAPI permissions |
-| `HTTP 404` | Wrong gateway URL — check your region |
-| `HTTP 429` | Handled automatically. Reduce `--cps` if persistent |
-| `Another instance running` | Wait, or use `--force` |
-| `0 images returned` | Check your QQL filter — use `--dry-run` to preview |
-| Infinite pagination loop | Fixed in v2.1.0 — duplicate detection stops it |
+| `HTTP 401` | Invalid credentials |
+| `HTTP 403` | No CSAPI permissions |
+| `HTTP 404` | Wrong gateway URL |
+| `HTTP 429` | Handled automatically |
+| Blank Vuln_Title/CVE/Patch columns | Vuln API returned no data for these QIDs (normal for some images) |
+| `0 images returned` | Check QQL filter — use `--dry-run` |
 
 ---
 
