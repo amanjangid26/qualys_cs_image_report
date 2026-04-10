@@ -1,29 +1,12 @@
-# Output directories
 qualys_snow_output/
-qualys_report_output/
-
-# Checkpoint and lock files
+*.log
+*.tmp
 .lock
 .checkpoint.json
-
-# Logs
-*.log
-
-# Temp files
-*.tmp
-
-# Python
 __pycache__/
 *.pyc
-*.pyo
 .env
-
-# OS
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
